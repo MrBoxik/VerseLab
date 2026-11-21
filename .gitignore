@@ -1,0 +1,10 @@
+__pycache__/
+bin/
+obj/
+data/
+runtime/
+models/
+exports/
+*.exe
+*.dll
+*.zip

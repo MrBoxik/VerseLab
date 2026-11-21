@@ -1,0 +1,13 @@
+# Taskbar lyrics with MusicBee
+
+This bundle contains Taskbar Media Presence 1.0.37 for Windhawk and `mb_TaskbarMediaPresence.dll` for MusicBee. Use **Taskbar setup** in Verse Lab to open this folder, copy the mod source, or switch to the tray. [Taskbar Media Presence](https://github.com/MrBoxik/Taskbar-Media-Presence) · [Windhawk](https://windhawk.net/)
+
+1. In Windhawk, edit your existing Taskbar Media Presence mod. Save a copy of its current source if you want to roll back. Replace the editor contents with `taskbar-media-presence.wh.cpp`, then choose **Compile Mod**. If this is your first installation, choose **Create a New Mod** in Windhawk and paste the same source.
+2. In MusicBee, go to **Edit → Edit Preferences → Plugins** and install `mb_TaskbarMediaPresence.dll` as the replacement for the existing Taskbar Media Presence companion. Keep the existing DLL as a backup if you have it. Restart MusicBee to load the updated plugin.
+3. Keep Verse Lab running with its window open or in the tray. **Taskbar setup** shows the MusicBee connection. Choose **MusicBee** as the widget’s source if multiple players are active, then right-click the widget and choose **Show lyrics**. For a persistent default, enable **Show lyrics** under **Lyrics** in the Windhawk mod settings. The same group contains width cap, scale, font size, font family and bold controls.
+
+Embedded and saved synchronized lyrics play immediately. For tracks that need lyrics, Verse Lab reuses the local lyrics pipeline and prepares missing results for upcoming local tracks exposed by MusicBee. Auto-DJ songs become eligible once MusicBee adds them to Now Playing. The lyrics panel uses the wider available side of the widget and collapses when space is too tight. The main controls stay in their normal position.
+
+Other players can supply the current track and timeline through Windows media controls. Verse Lab looks up synced lyrics when the title, artist and duration can be matched. The MusicBee companion supplies its local files and upcoming queue. The lyric strip uses the widget background and keeps the last line visible until the next cue. It estimates word timing for line-only lyrics. **Automatically fit lyrics** sizes the strip for the longest line and the available taskbar space. The strip hides when there are no lyrics.
+
+**Close to tray** keeps the player and any timed preparation running when you close the window. You can change the setting in **Taskbar setup**. **Open Verse Lab player** restores the window and **Exit Verse Lab** stops the app and its jobs. To roll back the widget or the MusicBee companion, restore the saved source in Windhawk or the previous DLL in MusicBee.

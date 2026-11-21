@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src https://verse-lab-audio.invalid; img-src 'self' data:; form-action 'none'">
+  <title>Verse Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="library">
+      <div class="brand"><img class="brand-image" src="/verse-lab.ico" alt=""><div>verse<span>lab</span></div></div>
+      <nav class="sidebar-switch" aria-label="Music list">
+        <button id="show-queue" class="secondary-button" aria-pressed="false">Up next</button>
+        <button id="show-library" class="secondary-button" aria-pressed="true">Music folder</button>
+      </nav>
+      <section id="queue-pane" class="sidebar-pane" aria-label="Up next" hidden>
+        <div id="external-track" class="external-track" hidden>
+          <strong id="external-title"></strong><span id="external-artist"></span>
+          <span id="external-time"></span>
+          <button id="follow-player" class="text-button" hidden>Follow this player</button>
+        </div>
+        <p id="queue-hint" class="hint"></p>
+        <div id="up-next"></div>
+      </section>
+      <section id="library-pane" class="sidebar-pane" aria-label="Music folder">
+      <div class="library-heading"><h2>Your music</h2><button id="rescan" class="icon-button" title="Rescan music folder" aria-label="Rescan music folder">↻</button></div>
+      <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" placeholder="Search your library" aria-label="Search your library"></label>
+      <div class="library-meta"><span id="library-count">Loading tracks…</span><button id="open-file" class="text-button">Open audio</button></div>
+      <div id="track-list" class="track-list" aria-label="Music library"><div id="track-spacer"><div id="visible-tracks"></div></div></div>
+      <div class="library-footer"><span class="live-dot"></span><span id="library-root"></span><button id="choose-folder" class="text-button">Change folder</button></div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section class="now-playing">
+        <div class="art" aria-hidden="true"><img id="cover-art" class="cover-image" alt="" hidden><div class="art-orbit"></div><span id="art-letter">v</span><div class="art-bars"><i></i><i></i><i></i><i></i><i></i></div></div>
+        <div class="track-info"><span class="eyebrow">NOW PLAYING</span><h1 id="track-title">Choose a song</h1><p id="track-artist"></p><div class="track-badges"><span id="source-badge" class="badge" hidden></span></div></div>
+      </section>
+
+      <section class="lyrics-shell">
+        <div class="lyrics-toolbar">
+          <div class="lyrics-heading">
+            <span class="live-dot"></span><h2>Lyrics</h2>
+            <span id="word-timing-note" hidden>Estimated word timing</span>
+          </div>
+          <div class="toolbar-actions">
+            <button id="find-lyrics" class="secondary-button" aria-haspopup="dialog" disabled>Find lyrics</button>
+            <button id="import-button" class="text-button" title="Import an LRC or text file" disabled>Import</button>
+            <button id="export-button" class="text-button" disabled>Export LRC</button>
+          </div>
+        </div>
+        <div class="asr-strip"><div><span id="asr-status" role="status"></span></div><div><button id="asr-generate" class="text-button" hidden>Prepare lyrics</button><button id="asr-cancel" class="text-button" hidden>Cancel</button></div></div>
+        <div id="lyrics-scroll" class="lyrics-scroll" tabindex="0" aria-label="Song lyrics">
+          <div id="empty-state" class="empty-state"><div class="empty-note" aria-hidden="true">♪</div><h3 id="empty-title">Lyrics appear when you play a song</h3></div>
+          <div id="lyrics-lines" class="lyrics-lines"></div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="workbench">
+      <section class="studio-section taskbar-section">
+        <button id="taskbar-setup" class="secondary-button" aria-haspopup="dialog">Taskbar setup</button>
+      </section>
+      <section class="studio-section">
+        <h2 class="section-label">LIBRARY PREPARATION</h2>
+        <label class="batch-option">Tracks<select id="batch-size"><option value="0">Entire music folder</option><option value="10">First 10 search results</option></select></label>
+        <label class="batch-option">Run for<select id="batch-duration"><option value="60">1 hour</option><option value="120" selected>2 hours</option><option value="240">4 hours</option><option value="480">8 hours</option><option value="0">Until complete</option></select></label>
+        <p id="batch-status" class="hint" role="status"></p>
+        <div class="batch-actions"><button id="batch-start" class="secondary-button" disabled>Start preparation</button><button id="batch-pause" class="text-button" hidden>Stop</button></div>
+      </section>
+    </aside>
+
+    <footer class="player">
+      <div class="mini-track"><div class="mini-art" aria-hidden="true"><span>♫</span><img id="mini-cover-art" class="cover-image" alt="" hidden></div><div><strong id="mini-title">Nothing playing yet</strong><span id="mini-artist"></span></div></div>
+      <div class="transport"><div class="transport-buttons"><button id="previous" class="icon-button" aria-label="Previous song">⏮</button><button id="back" class="icon-button skip-button" aria-label="Back five seconds">−5</button><button id="play" class="play-button" aria-label="Play">▶</button><button id="forward" class="icon-button skip-button" aria-label="Forward five seconds">+5</button><button id="next" class="icon-button" aria-label="Next song">⏭</button></div><div class="seek-row"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="100" step="0.05" value="0" aria-label="Playback position"><span id="duration">0:00</span></div></div>
+      <div class="volume-control"><button id="mute" class="icon-button" aria-label="Mute">♫</button><input id="volume" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="Volume"></div>
+    </footer>
+  </div>
+
+  <dialog id="find-dialog" aria-labelledby="find-heading">
+    <div class="dialog-heading">
+      <h2 id="find-heading">Find lyrics online</h2>
+      <button id="find-close" class="icon-button" aria-label="Close lyrics search">✕</button>
+    </div>
+    <p id="search-recording" class="hint"></p>
+    <form id="find-form">
+      <label>Song title<input id="query-title" required></label>
+      <label>Artist<input id="query-artist"></label>
+      <div class="search-actions"><button id="search-lyrics" class="primary-button" type="submit">Search LRCLIB</button></div>
+    </form>
+    <p id="search-status" class="search-status" role="status"></p>
+    <div id="candidates" class="candidates" aria-label="Matching lyric versions"></div>
+  </dialog>
+
+  <dialog id="taskbar-dialog" aria-labelledby="taskbar-heading">
+    <div class="dialog-heading">
+      <h2 id="taskbar-heading">Taskbar lyrics</h2>
+      <button id="taskbar-close" class="icon-button" aria-label="Close taskbar setup">✕</button>
+    </div>
+    <ol class="taskbar-steps">
+      <li>Load the bundled mod source in Windhawk. Compile it, then turn on <strong>Show lyrics</strong> on your taskbar widget.</li>
+      <li>In MusicBee, use <strong>Preferences → Plugins → Add Plugin</strong> with the bundled MusicBee DLL, then restart MusicBee.</li>
+      <li>Keep Verse Lab running while MusicBee plays. Taskbar mode moves Verse Lab to the system tray.</li>
+    </ol>
+    <label class="close-setting"><input id="close-to-tray" type="checkbox"> Keep Verse Lab in the tray when I close the window</label>
+    <p id="taskbar-connection" class="hint"></p>
+    <div class="taskbar-actions">
+      <button id="taskbar-copy" class="secondary-button">Copy mod source</button>
+      <button id="taskbar-files" class="secondary-button">Open bundled files</button>
+      <button id="taskbar-windhawk" class="secondary-button">Open Windhawk</button>
+      <button id="taskbar-start" class="primary-button">Start Taskbar mode</button>
+    </div>
+    <p id="taskbar-status" class="hint" role="status"></p>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <audio id="audio" preload="metadata"></audio>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
