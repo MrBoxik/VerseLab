@@ -393,8 +393,9 @@ function closeLyricsSearch() {
 
 function openLyricsSearch() {
   if (!song?.metadata) return;
-  const {title, artist, duration} = song.metadata;
-  lookup = {song, pending: false};
+  const {title, artist} = song.metadata;
+  const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : song.metadata.duration;
+  lookup = {song, duration, pending: false};
   $('query-title').value = title;
   $('query-artist').value = artist;
   $('search-recording').textContent = duration > 0 ? `Current recording · ${clock(duration)}` : '';
@@ -418,12 +419,12 @@ async function searchLyrics() {
   $('candidates').replaceChildren();
   status.textContent = 'Searching LRCLIB…';
   try {
-    const rows = await call('search', {title, artist, duration: current.song.metadata.duration});
+    const rows = await call('search', {title, artist, duration: current.duration});
     if (lookup !== current || !lookupDialog.open || song !== current.song) return;
     const available = rows.filter(row => row.syncedLyrics?.trim() || row.plainLyrics?.trim()).map(row => ({
       ...row, trackName: row.trackName || title, artistName: row.artistName || '', duration: Number(row.duration) || 0,
     }));
-    const versions = rankCandidates(available, {title, artist, duration: current.song.metadata.duration});
+    const versions = rankCandidates(available, {title, artist, duration: current.duration});
     $('candidates').replaceChildren(...versions.map(row => lyricCandidate(row, current)));
     status.textContent = versions.length ? `${versions.length} ${versions.length === 1 ? 'version' : 'versions'} found`
       : 'No lyrics match this recording’s length.';
