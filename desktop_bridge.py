@@ -176,6 +176,8 @@ def dispatch(manager, request):
         return manager.status()
     if action == "transcriptionLimit":
         return manager.configure({"maxTrackMinutes": request["minutes"]})["settings"]["maxTrackMinutes"]
+    if action == "transcriptionAgents":
+        return manager.configure({"agents": request["count"]})["agents"]
     if action == "batch":
         if request.get("pause"):
             return manager.cancel_batch()

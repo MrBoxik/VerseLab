@@ -74,6 +74,12 @@
           </div>
           <p id="transcription-limit-hint" class="hint">Enter 0 for no limit.</p>
         </form>
+        <label class="batch-option">Number of agents
+          <select id="transcription-agents" aria-describedby="agent-status" disabled>
+            <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          </select>
+        </label>
+        <p id="agent-status" class="hint">For playback and library preparation</p>
         <label class="batch-option">Tracks<select id="batch-size"><option value="0">Entire music folder</option><option value="10">First 10 search results</option></select></label>
         <label class="batch-option">Run for<select id="batch-duration"><option value="60">1 hour</option><option value="120" selected>2 hours</option><option value="240">4 hours</option><option value="480">8 hours</option><option value="0">Until complete</option></select></label>
         <p id="batch-status" class="hint" role="status"></p>

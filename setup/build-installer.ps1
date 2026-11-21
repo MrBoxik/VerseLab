@@ -37,7 +37,7 @@ if ($LASTEXITCODE) { throw 'Verse Lab build failed.' }
 if ($LASTEXITCODE) { throw 'Transcription worker build failed.' }
 
 Copy-Item -LiteralPath (Join-Path $player 'Verse Lab.exe') -Destination $payload
-foreach ($name in @('app.py','audio_alignment.py','audio_tags.py','desktop_bridge.py','lyric_pipeline.py',
+foreach ($name in @('app.py','audio_alignment.py','audio_tags.py','desktop_bridge.py','gpu_budget.py','lyric_pipeline.py',
                     'setup_transcription.py','transcription.py','config.json','LICENSE','THIRD_PARTY.md')) {
     Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $payload
 }

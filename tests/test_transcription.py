@@ -40,7 +40,10 @@ class TranscriptionTests(unittest.TestCase):
         self.manager=Preparation(self.base,lambda key:self.paths[key],metadata,lambda a,t:{'results':[]},lambda key:{})
         self.fake=FakeEngine();self.manager.engine=self.fake
     def tearDown(self):
-        self.manager.close();self.manager.thread.join(timeout=2);self.temp.cleanup()
+        self.manager.close()
+        for thread in self.manager.threads:
+            thread.join(timeout=2)
+        self.temp.cleanup()
     def test_cache_avoids_reprocessing_and_music_is_unchanged(self):
         self.fake.release.set();job=self.manager.prepare('a','manual')
         wait_until(lambda:self.manager.jobs[job['key']]['status']=='complete')
@@ -139,6 +142,60 @@ class TranscriptionTests(unittest.TestCase):
         self.fake.release.set()
         wait_until(lambda: self.manager.jobs[current['key']]['status'] == 'complete')
 
+    def test_two_agents_process_distinct_recordings_and_batch_waits_for_both(self):
+        second = FakeEngine()
+        self.manager.extra_engines[0] = second
+        with patch('transcription.available_agents', return_value=2):
+            self.manager.configure({'agents': 4})
+            self.manager.start_batch(['a', 'a', 'b'])
+            wait_until(lambda: self.fake.started and second.started)
+            self.assertEqual(set(self.fake.started + second.started), {'a', 'b'})
+            self.assertEqual(self.manager.status()['agents']['allowed'], 2)
+            track = self.fake.started[0]
+            expected = next(job['key'] for job in self.manager.status()['jobs'] if job['trackId'] == track)
+            self.assertEqual(self.manager.prepare(track, 'manual', force=True)['key'], expected)
+            self.fake.release.set()
+            wait_until(lambda: self.manager.status()['batch']['prepared'] == 1)
+            self.assertEqual(self.manager.status()['batch']['status'], 'running')
+            second.release.set()
+            wait_until(lambda: self.manager.status()['batch']['status'] == 'complete')
+        self.assertEqual(self.manager.status()['batch']['prepared'], 2)
+
+    def test_stop_batch_leaves_other_agents_current_song_running(self):
+        second = FakeEngine()
+        self.manager.extra_engines[0] = second
+        with patch('transcription.available_agents', return_value=2):
+            self.manager.configure({'agents': 2})
+            current = self.manager.prepare('a')
+            self.manager.start_batch(['b', 'c'])
+            wait_until(lambda: self.fake.started and second.started)
+            self.manager.cancel_batch()
+            wait_until(lambda: self.manager.status()['batch']['status'] == 'paused')
+            self.assertFalse(self.manager.running[current['key']][1].is_set())
+            self.fake.release.set()
+            second.release.set()
+            wait_until(lambda: self.manager.jobs[current['key']]['status'] == 'complete')
+
+    def test_one_allowed_agent_stays_serial_and_desktop_saves_agent_count(self):
+        second = FakeEngine()
+        self.manager.extra_engines[0] = second
+        with patch('transcription.available_agents', return_value=1):
+            self.manager.configure({'agents': 4})
+            self.manager.start_batch(['a', 'b'])
+            wait_until(lambda: self.fake.started == ['a'])
+            self.assertEqual(second.started, [])
+            self.fake.release.set()
+            wait_until(lambda: self.manager.status()['batch']['status'] == 'complete')
+            restored = Preparation(self.base, self.manager.get_path, self.manager.get_metadata,
+                                   self.manager.find_online, self.manager.get_saved, defaults_only=True)
+            try:
+                self.assertEqual(restored.settings['agents'], 4)
+            finally:
+                restored.close()
+                for thread in restored.threads:
+                    thread.join(timeout=2)
+        self.assertEqual(self.fake.started, ['a', 'b'])
+
     def test_batch_embeds_a_cached_draft_without_loading_the_model(self):
         self.manager.embed_audio = True
         cache = self.manager.folder / (recording_key(self.paths['a'], DEFAULTS) + '.json')
@@ -154,7 +211,7 @@ class TranscriptionTests(unittest.TestCase):
         job=self.manager.prepare('a','prefetch');wait_until(lambda:self.fake.started==['a'])
         self.manager.prefetch(['b'],current_id='a')
         self.assertEqual(self.manager.jobs[job['key']]['reason'],'current')
-        self.assertFalse(self.manager.cancel_event.is_set())
+        self.assertFalse(self.manager.running[job['key']][1].is_set())
         self.fake.release.set();wait_until(lambda:self.manager.jobs[job['key']]['status']=='complete')
     def test_resident_keeps_model_ready_and_disabled_unloads_it(self):
         self.manager.configure({'mode':'resident'})

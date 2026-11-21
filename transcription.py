@@ -1,4 +1,4 @@
-"""Single local whisper.cpp worker, bounded queue and per-recording/model cache."""
+"""Local Whisper workers sharing a bounded queue and per-recording cache."""
 from __future__ import annotations
 import atexit
 from collections import deque
@@ -18,6 +18,7 @@ import uuid
 import wave
 from audio_alignment import match_audio
 from audio_tags import TAG_LOCK, fingerprint, lyric_digest, lyrics_text, read_audio_tags, save_audio_lyrics
+from gpu_budget import MAX_AGENTS, available_agents
 from lyric_pipeline import (PIPELINE_VERSION, FIXED_MODEL, gpu_lyric_lines, match_reference, matches_lyric_duration,
                             place_audio_reference, reference_queries, suspicious_repetition, tokens)
 
@@ -25,7 +26,7 @@ MODELS = {
     "large-v3": {"file": "ggml-large-v3.bin", "bytes": 3095033483, "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"},
 }
 DEFAULTS = {"model": FIXED_MODEL, "mode": "on_demand", "threads": 4, "language": "auto",
-            "automatic": True, "prefetch": True, "lookahead": 2, "maxTrackMinutes": 20}
+            "automatic": True, "prefetch": True, "lookahead": 2, "maxTrackMinutes": 20, "agents": 1}
 
 
 def validate_settings(values, previous=None):
@@ -43,6 +44,8 @@ def validate_settings(values, previous=None):
         raise ValueError("Automatic and prefetch settings must be true or false.")
     if type(result["maxTrackMinutes"]) is not int or not 0 <= result["maxTrackMinutes"] <= 1440:
         raise ValueError("Maximum track length must be a whole number of minutes from 0 to 1440.")
+    if type(result["agents"]) is not int or not 1 <= result["agents"] <= MAX_AGENTS:
+        raise ValueError("Choose between one and four transcription agents.")
     return result
 
 
@@ -113,9 +116,15 @@ class TrackTooLong(Exception):
         super().__init__(f"Track exceeds the {minutes}-minute transcription limit.")
 
 
+class AgentCapacityChanged(Exception):
+    pass
+
+
 class Engine:
-    def __init__(self, base):
+    def __init__(self, base, index=0, can_start=None):
         self.base = base
+        self.index = index
+        self.can_start = can_start
         (base / "data" / "asr-cache").mkdir(parents=True, exist_ok=True)
         self.proc = None
         self.signature = None
@@ -190,7 +199,8 @@ class Engine:
             import msvcrt
         except ImportError:
             return None
-        slot = (self.base / "data" / "large-v3.lock").open("a+b")
+        name = f"large-v3-{self.index + 1}.lock" if self.index else "large-v3.lock"
+        slot = (self.base / "data" / name).open("a+b")
         try:
             while not cancel.is_set():
                 try:
@@ -213,13 +223,16 @@ class Engine:
                 return 0
             self.stop()
             command, model = self.requirements()
+        if self.can_start is not None and not self.can_start():
+            raise AgentCapacityChanged()
         slot = self._reserve_worker(cancel)
         with self.lock:
             self.worker_slot = slot
             try:
                 if cancel.is_set():
                     raise Cancelled()
-                self.log = (self.base / "data" / "transcription-worker.log").open("w", encoding="utf-8")
+                name = f"transcription-worker-{self.index + 1}.log" if self.index else "transcription-worker.log"
+                self.log = (self.base / "data" / name).open("w", encoding="utf-8")
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
                 started = time.monotonic()
                 self.proc = subprocess.Popen([*command, "--worker", str(model)], cwd=self.base,
@@ -311,9 +324,12 @@ class Preparation:
         self.settings_file = base / "data" / "transcription-settings.json"
         stored = json.loads(self.settings_file.read_text(encoding="utf-8")) if self.settings_file.exists() else {}
         if defaults_only:
-            stored = {"maxTrackMinutes": stored.get("maxTrackMinutes", DEFAULTS["maxTrackMinutes"])}
+            stored = {name: stored.get(name, DEFAULTS[name]) for name in ("maxTrackMinutes", "agents")}
         self.settings = validate_settings(stored)
         self.engine = Engine(base)
+        self.extra_engines = [
+            Engine(base, index, lambda index=index: self._can_start(index)) for index in range(1, MAX_AGENTS)
+        ]
         self.condition = threading.Condition(threading.RLock())
         self.jobs, self.pending = {}, []
         self.batch_pending = deque()
@@ -322,37 +338,71 @@ class Preparation:
         self.prefetch_revision = 0
         self.batch = {"status": "idle"}
         self.batch_timer = None
-        self.current = None
-        self.cancel_event = threading.Event()
+        self.running = {}
+        self.agent_limit = 1
+        self.budget_sample_time = 0
         self.closed = False
         self.warm_error = None
-        self.thread = threading.Thread(target=self._loop, name="lyrics-preparation", daemon=True)
-        self.thread.start()
+        self.threads = [threading.Thread(target=self._loop, args=(index,), name=f"lyrics-agent-{index + 1}", daemon=True)
+                        for index in range(MAX_AGENTS)]
+        self.thread = self.threads[0]
+        for thread in self.threads:
+            thread.start()
         atexit.register(self.close)
+
+    def _engines(self):
+        return [self.engine, *self.extra_engines]
+
+    def _agent_limit(self):
+        if self.settings["agents"] == 1 or self.settings["mode"] == "disabled":
+            return 1
+        if time.monotonic() >= self.budget_sample_time + 1:
+            pids = [pid for engine in self._engines() if (pid := engine.status().get("pid")) is not None]
+            self.agent_limit = available_agents(self.settings["agents"], pids)
+            self.budget_sample_time = time.monotonic()
+        return min(self.settings["agents"], self.agent_limit)
+
+    def _can_start(self, index):
+        with self.condition:
+            return index < self._agent_limit()
+
+    def _cancel_running(self, matches):
+        for key, (engine, cancel) in self.running.items():
+            if matches(self.jobs[key]):
+                cancel.set()
+                engine.stop()
 
     def close(self):
         with self.condition:
             self.closed = True
             if self.batch_timer:
                 self.batch_timer.cancel()
-            self.cancel_event.set()
+            for _, cancel in self.running.values():
+                cancel.set()
             self.condition.notify_all()
-        self.engine.stop()
+        for engine in self._engines():
+            engine.stop()
 
     def configure(self, values):
         with self.condition:
             updated = validate_settings(values, self.settings)
             changed = any(updated[k] != self.settings[k] for k in ("model", "threads", "language", "mode"))
-            self.settings = updated
+            previous_lookahead = max(self.settings["lookahead"], self._agent_limit()) if self.prefetch_pending else 0
             write_json(self.settings_file, updated)
+            self.settings = updated
+            self.budget_sample_time = 0
+            if self.prefetch_pending:
+                lookahead = max(updated["lookahead"], self._agent_limit())
+                self.prefetch_remaining = max(0, self.prefetch_remaining + lookahead - previous_lookahead)
             self.warm_error = None
             if changed:
                 self.cancel_batch()
-                self.cancel_event.set()
+                self._cancel_running(lambda job: True)
                 for key in self.pending:
                     self.jobs[key].update(status="cancelled", phase="Settings changed")
                 self.pending.clear()
-                self.engine.stop()
+                for engine in self._engines():
+                    engine.stop()
             self.condition.notify_all()
         return self.status()
 
@@ -369,6 +419,15 @@ class Preparation:
             if self.settings["mode"] == "disabled":
                 raise ValueError("Local transcription is disabled. Choose a loading mode in AI settings.")
             key = recording_key(path, self.settings)
+            prior_key = next((active for active in self.running if self.jobs[active]["trackId"] == track_id), key)
+            prior = self.jobs.get(prior_key)
+            if prior and prior["status"] in {"queued", "running"}:
+                if reason != "prefetch" and prior["reason"] != "batch":
+                    prior["reason"] = reason
+                    if prior_key in self.pending:
+                        self.pending.remove(prior_key)
+                        self.pending.insert(0, prior_key)
+                return dict(prior)
             embedded, _ = read_audio_tags(path) if self.embed_audio and not force else ("", "")
             cached = None if force else self.cached(track_id)
             if embedded and (not cached or cached.get("embeddedDigest") != lyric_digest(embedded)):
@@ -377,28 +436,21 @@ class Preparation:
             if cached:
                 self.jobs[key] = {"key": key, "trackId": track_id, "reason": reason, "status": "complete", "phase": "Cached", "cached": True, "seconds": 0}
                 return {"status": "complete", "cached": True, "result": cached}
-            prior = self.jobs.get(key)
-            if prior and prior["status"] in {"queued", "running"}:
-                if reason != "prefetch" and prior["reason"] != "batch":
-                    prior["reason"] = reason
-                if reason != "prefetch" and key in self.pending:
-                    self.pending.remove(key)
-                    self.pending.insert(0, key)
-                    prior["reason"] = reason
-                return dict(prior)
             job = {"key": key, "trackId": track_id, "status": "queued", "reason": reason, "phase": "Queued", "createdAt": time.time(), "force": force}
             self.jobs[key] = job
             if reason == "prefetch":
                 self.pending.append(key)
             else:
                 self.pending.insert(0, key)
-                if self.current and self.jobs[self.current]["reason"] == "prefetch":
-                    self.cancel_event.set()
-                    self.engine.stop()
+                if len(self.running) >= self._agent_limit():
+                    victim = next((self.jobs[active] for active in self.running
+                                   if self.jobs[active]["reason"] == "prefetch"), None)
+                    if victim is not None:
+                        self._cancel_running(lambda item: item is victim)
             # Bound in-memory history independently of the disk result cache.
             if len(self.jobs) > 80:
                 for old in list(self.jobs):
-                    if old != key and self.jobs[old]["status"] not in {"running", "queued"}:
+                    if old != key and old not in self.running and self.jobs[old]["status"] not in {"running", "queued"}:
                         del self.jobs[old]
                         if len(self.jobs) <= 60:
                             break
@@ -418,18 +470,18 @@ class Preparation:
                     self.jobs[key]["reason"] = "current"
                     self.pending.remove(key)
                     self.pending.insert(0, key)
-            if self.current and self.jobs[self.current]["trackId"] == current_id and self.jobs[self.current]["reason"] != "batch":
-                self.jobs[self.current]["reason"] = "current"
+            for active in self.running:
+                job = self.jobs[active]
+                if job["trackId"] == current_id and job["reason"] != "batch":
+                    job["reason"] = "current"
             for key in list(self.pending):
                 if self.jobs[key]["reason"] == "prefetch" and self.jobs[key]["trackId"] not in wanted:
                     self.pending.remove(key)
                     self.jobs[key].update(status="cancelled", phase="Removed from upcoming queue")
-            if self.current and self.jobs[self.current]["reason"] == "prefetch" and self.jobs[self.current]["trackId"] not in wanted:
-                self.cancel_event.set()
-                self.engine.stop()
+            self._cancel_running(lambda job: job["reason"] == "prefetch" and job["trackId"] not in wanted)
             if self.embed_audio:
                 self.prefetch_pending = deque(wanted)
-                self.prefetch_remaining = self.settings["lookahead"]
+                self.prefetch_remaining = max(self.settings["lookahead"], self._agent_limit())
                 self.prefetch_revision += 1
                 self.condition.notify_all()
         if not self.embed_audio and self.settings["prefetch"] and self.settings["mode"] != "disabled":
@@ -477,9 +529,7 @@ class Preparation:
             if reason:
                 self.batch["stopReason"] = reason
             self.batch["status"] = "stopping" if self.batch["current"] else "paused"
-            if self.batch["current"]:
-                self.cancel_event.set()
-                self.engine.stop()
+            self._cancel_running(lambda job: job["reason"] == "batch")
             self.condition.notify_all()
             return dict(self.batch)
 
@@ -488,6 +538,9 @@ class Preparation:
             return None
         for _ in range(min(12, len(self.batch_pending))):
             track_id = self.batch_pending.popleft()
+            if any(self.jobs[key]["trackId"] == track_id for key in self.running):
+                self.batch_pending.append(track_id)
+                continue
             try:
                 path = self.get_path(track_id)
                 key = recording_key(path, settings)
@@ -510,7 +563,7 @@ class Preparation:
             self.batch["current"] = track_id
             self.jobs[key] = {"key": key, "trackId": track_id, "status": "queued", "reason": "batch"}
             return key
-        if not self.batch_pending:
+        if not self.batch_pending and not self.batch["current"]:
             self.batch["status"] = "complete"
             self._clear_batch_timer()
         return None
@@ -525,9 +578,7 @@ class Preparation:
                 if track_id is None or self.jobs[key]["trackId"] == track_id:
                     self.pending.remove(key)
                     self.jobs[key].update(status="cancelled", phase="Cancelled")
-            if self.current and (track_id is None or self.jobs[self.current]["trackId"] == track_id):
-                self.cancel_event.set()
-                self.engine.stop()
+            self._cancel_running(lambda job: track_id is None or job["trackId"] == track_id)
         return self.status()
 
     def status(self):
@@ -535,7 +586,9 @@ class Preparation:
             jobs = [dict(j, elapsed=round(time.time() - j["startedAt"], 1) if j.get("status") == "running" else j.get("seconds", 0))
                     for j in self.jobs.values()]
             models = {k: {**{f: v for f, v in spec.items() if f != "sha256"}, "installed": (self.base / "models" / spec["file"]).is_file()} for k, spec in MODELS.items()}
-            return {"settings": dict(self.settings), "worker": self.engine.status(), "models": models, "jobs": jobs, "batch": dict(self.batch),
+            workers = [engine.status() for engine in self._engines()]
+            return {"settings": dict(self.settings), "worker": workers[0], "models": models, "jobs": jobs, "batch": dict(self.batch),
+                    "agents": {"allowed": self._agent_limit(), "loaded": sum(bool(worker["loaded"]) for worker in workers)},
                     "warmError": self.warm_error, "pipelineVersion": PIPELINE_VERSION, "backend": "Whisper Large-v3 · Vulkan GPU"}
 
     def _references(self, metadata, cached_only=False):
@@ -604,6 +657,7 @@ class Preparation:
         return {**result, "duration": duration, "reusedAnchors": True}
 
     def _schedule_prefetch(self, track_id, revision, settings):
+        queued = False
         try:
             path = self.get_path(track_id)
             if read_audio_tags(path)[0] or (self.folder / (recording_key(path, settings) + ".json")).exists():
@@ -611,60 +665,69 @@ class Preparation:
             with self.condition:
                 if revision != self.prefetch_revision or self.closed:
                     return
+                key = recording_key(path, settings)
+                if key in self.pending or any(self.jobs[active]["trackId"] == track_id for active in self.running):
+                    return
                 job = self.prepare(track_id, "prefetch")
                 if job["status"] != "complete" and job["reason"] == "prefetch":
                     self.jobs[job["key"]]["prefetchRevision"] = revision
-                    self.prefetch_remaining -= 1
+                    queued = True
         except (ValueError, OSError, KeyError):
             return
+        finally:
+            with self.condition:
+                if not queued and revision == self.prefetch_revision:
+                    self.prefetch_remaining += 1
+                self.condition.notify_all()
 
-    def _loop(self):
+    def _loop(self, index):
         sleep_blocked = False
         while True:
             with self.condition:
                 if self.closed:
                     return
-                keep_awake = self.embed_audio and self.batch["status"] in {"running", "stopping"}
+                engine = self.engine if index == 0 else self.extra_engines[index - 1]
+                keep_awake = index == 0 and self.embed_audio and self.batch["status"] in {"running", "stopping"}
                 if os.name == "nt" and keep_awake != sleep_blocked:
                     continuous, system_required = 0x80000000, 0x00000001
                     ctypes.windll.kernel32.SetThreadExecutionState(continuous | (system_required if keep_awake else 0))
                     sleep_blocked = keep_awake
                 settings = dict(self.settings)
                 candidate = None
-                if self.pending:
-                    key = self.pending.pop(0)
-                elif self.prefetch_pending and self.prefetch_remaining > 0 and settings["prefetch"] and settings["mode"] != "disabled":
-                    key = None
-                    candidate = (self.prefetch_pending.popleft(), self.prefetch_revision)
-                else:
-                    key = self._next_batch_job(settings)
+                key = None
+                has_work = bool(self.pending or self.batch_pending or
+                                (self.batch["status"] == "running" and not self.batch["current"]) or
+                                (self.prefetch_pending and self.prefetch_remaining > 0 and settings["prefetch"]))
+                if has_work and settings["mode"] != "disabled":
+                    limit = self._agent_limit()
+                    if index < limit and len(self.running) < limit:
+                        if self.pending:
+                            key = self.pending.pop(0)
+                        elif self.prefetch_pending and self.prefetch_remaining > 0 and settings["prefetch"]:
+                            candidate = (self.prefetch_pending.popleft(), self.prefetch_revision)
+                            self.prefetch_remaining -= 1
+                        else:
+                            key = self._next_batch_job(settings)
                 if key:
                     is_batch = self.jobs[key]["reason"] == "batch"
-                    self.current = key
-                    self.cancel_event = threading.Event()
-                    cancel = self.cancel_event
+                    cancel = threading.Event()
+                    self.running[key] = (engine, cancel)
                     job = self.jobs[key]
                     job.update(status="running", phase="Checking saved lyrics", startedAt=time.time())
-                else:
-                    self.current = None
             if candidate:
                 self._schedule_prefetch(*candidate, settings)
                 continue
             if not key:
-                if settings["mode"] == "resident" and not self.engine.status()["loaded"] and not self.warm_error:
+                if index == 0 and settings["mode"] == "resident" and not engine.status()["loaded"] and not self.warm_error:
                     try:
-                        self.engine.ready(settings, threading.Event())
+                        engine.ready(settings, threading.Event())
                     except Exception as exc:
                         self.warm_error = str(exc)
-                        self.engine.stop()
-                elif settings["mode"] != "resident":
-                    self.engine.stop()
+                        engine.stop()
+                elif index != 0 or settings["mode"] != "resident":
+                    engine.stop()
                 with self.condition:
-                    if not self.pending and not self.batch_pending and not (
-                        self.prefetch_pending and self.prefetch_remaining > 0
-                        and settings["prefetch"] and settings["mode"] != "disabled"
-                    ):
-                        self.condition.wait(timeout=1)
+                    self.condition.wait(timeout=.15 if has_work else 1)
                 continue
             try:
                 started = time.monotonic()
@@ -708,7 +771,7 @@ class Preparation:
                     if limit and float(metadata.get("duration") or 0) > limit * 60:
                         raise TrackTooLong(limit)
                     settings["maxTrackMinutes"] = limit
-                    result = self.engine.run(path, settings, cancel, lambda phase: job.update(phase=phase))
+                    result = engine.run(path, settings, cancel, lambda phase: job.update(phase=phase))
                     job["phase"] = "Matching lyrics to the audio"
                     fit = self._match(result["lines"], references, {**metadata, "duration": result["duration"]}, cancel)
                     if fit:
@@ -736,17 +799,28 @@ class Preparation:
                 job.update(status="cancelled", phase="Cancelled")
             except TrackTooLong as exc:
                 job.update(status="skipped", phase=str(exc))
+            except AgentCapacityChanged:
+                job.update(status="cancelled" if cancel.is_set() else "queued",
+                           phase="Cancelled" if cancel.is_set() else "Waiting for GPU memory")
             except Exception as exc:
                 job.update(status="cancelled" if cancel.is_set() else "failed", phase="Cancelled" if cancel.is_set() else str(exc), seconds=round(time.time() - job["startedAt"], 2))
-                self.engine.stop()
+                engine.stop()
             finally:
                 with self.condition:
-                    self.current = None
+                    self.running.pop(key, None)
+                    if job["status"] == "queued":
+                        if is_batch and self.batch["status"] == "running":
+                            self.batch_pending.appendleft(job["trackId"])
+                        elif not is_batch:
+                            self.pending.insert(0, key)
+                        else:
+                            job.update(status="cancelled", phase="Cancelled")
                     if (job["status"] == "skipped" and job["reason"] == "prefetch"
                             and job.get("prefetchRevision") == self.prefetch_revision):
                         self.prefetch_remaining += 1
                     if is_batch:
-                        self.batch["current"] = None
+                        self.batch["current"] = next((self.jobs[active]["trackId"] for active in self.running
+                                                      if self.jobs[active]["reason"] == "batch"), None)
                         if job["status"] == "complete":
                             self.batch["consecutiveFailures"] = 0
                             if result.get("embedError"):
@@ -766,20 +840,18 @@ class Preparation:
                             self.batch["lastError"] = job["phase"]
                             self.batch["consecutiveFailures"] = self.batch.get("consecutiveFailures", 0) + 1
                             if self.batch["consecutiveFailures"] >= 3:
-                                self.batch["status"] = "paused"
+                                self.batch["status"] = "stopping"
                                 self.batch_pending.clear()
-                        if self.batch["status"] == "stopping":
+                        if self.batch["status"] == "stopping" and not self.batch["current"]:
                             self.batch["status"] = "paused"
-                        elif self.batch["status"] == "running" and not self.batch_pending:
+                        elif self.batch["status"] == "running" and not self.batch_pending and not self.batch["current"]:
                             self.batch["status"] = "complete"
                         if self.batch["status"] in {"complete", "paused"}:
                             self._clear_batch_timer()
                         if len(self.jobs) > 80:
                             for old in list(self.jobs):
-                                if self.jobs[old]["status"] not in {"running", "queued"}:
+                                if old not in self.running and self.jobs[old]["status"] not in {"running", "queued"}:
                                     del self.jobs[old]
                                     if len(self.jobs) <= 60:
                                         break
-                    if (self.settings["mode"] != "resident" and not self.pending and not self.batch_pending
-                            and not (self.prefetch_pending and self.prefetch_remaining > 0)):
-                        self.engine.stop()
+                    self.condition.notify_all()

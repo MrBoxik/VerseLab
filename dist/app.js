@@ -577,6 +577,12 @@ async function poll() {
     $('taskbar-connection').textContent = followed?.status || 'Waiting for playback';
     renderExternal(followed);
     jobState = await call('status');
+    const agents = $('transcription-agents');
+    if (agents.disabled && agentChange === null) {
+      agents.value = jobState.settings.agents;
+      agents.disabled = false;
+    }
+    if (agentChange === null) renderAgentCapacity(jobState.agents);
     if ($('transcription-limit').disabled && Number.isInteger(jobState.settings.maxTrackMinutes)) {
       $('transcription-limit').value = jobState.settings.maxTrackMinutes;
       $('transcription-limit').disabled = $('save-transcription-limit').disabled = false;
@@ -817,6 +823,25 @@ $('transcription-limit-form').onsubmit = run(async event => {
     notify(saved ? `Transcription limit saved · ${saved} min` : 'Transcription length is unlimited');
   } finally {
     button.disabled = false;
+  }
+});
+let agentChange = null;
+function renderAgentCapacity(agents) {
+  $('agent-status').textContent = `${agents.allowed} available with current VRAM · ${agents.loaded} loaded`;
+}
+$('transcription-agents').onchange = run(async event => {
+  const select = event.target;
+  select.disabled = true;
+  const request = call('transcriptionAgents', {count: Number(select.value)});
+  agentChange = request;
+  try {
+    renderAgentCapacity(await request);
+  } catch (error) {
+    if (jobState) select.value = jobState.settings.agents;
+    throw error;
+  } finally {
+    agentChange = null;
+    select.disabled = false;
   }
 });
 $('batch-size').onchange = () => { if (jobState) renderBatch(jobState.batch); };
