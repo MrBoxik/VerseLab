@@ -491,7 +491,8 @@ function renderQueue() {
     const status = jobState?.jobs.filter(job => job.trackId === track.key).at(-1);
     const sub = status?.status === 'complete' ? 'Lyrics ready'
       : status?.status === 'running' ? 'Preparing lyrics'
-      : status?.status === 'queued' ? 'Queued' : '';
+      : status?.status === 'queued' ? 'Queued'
+      : status?.status === 'skipped' ? 'Over limit' : '';
     return {track, sub};
   });
   const signature = JSON.stringify(entries.map(({track, sub}) => [track.key, sub]));
@@ -557,6 +558,7 @@ function renderBatch(batch) {
     [batch.status[0].toUpperCase() + batch.status.slice(1), batch.prepared + ' ready',
       batch.skipped + ' skipped', batch.failed + ' failed', batch.total + ' total'].join(' · ');
   if (batch.lastError) $('batch-status').append(document.createElement('br'), batch.lastError);
+  if (batch.skippedLong) $('batch-status').append(document.createElement('br'), batch.skippedLong + ' over the transcription limit');
   if (active && batch.endsAt) {
     const minutes = Math.max(1, Math.ceil((batch.endsAt * 1000 - Date.now()) / 60000));
     $('batch-status').append(document.createElement('br'), minutes + ' min left');
@@ -575,6 +577,10 @@ async function poll() {
     $('taskbar-connection').textContent = followed?.status || 'Waiting for playback';
     renderExternal(followed);
     jobState = await call('status');
+    if ($('transcription-limit').disabled && Number.isInteger(jobState.settings.maxTrackMinutes)) {
+      $('transcription-limit').value = jobState.settings.maxTrackMinutes;
+      $('transcription-limit').disabled = $('save-transcription-limit').disabled = false;
+    }
     renderQueue();
     renderBatch(jobState.batch);
     const current = song;
@@ -584,9 +590,9 @@ async function poll() {
     if (job?.status === 'complete') {
       const result = await call('result', {key: current.item.key});
       if (song === current && current.job === key && result) await accept(current, result);
-    } else if (job?.status === 'failed' || job?.status === 'cancelled') {
+    } else if (['failed', 'cancelled', 'skipped'].includes(job?.status)) {
       current.job = undefined;
-      current.failed = true;
+      current.failed = job.status !== 'skipped';
       showPreparation(current, job.phase);
     } else if (job) {
       showPreparation(current, job.phase + ' · ' + Math.round(job.elapsed || 0) + 's');
@@ -798,6 +804,21 @@ $('batch-start').onclick = run(async () => renderBatch(await call('batch', {
   keys: $('batch-size').value === '0' ? null : results.slice(0, 10).map(track => track.key),
   minutes: Number($('batch-duration').value),
 })));
+$('transcription-limit-form').onsubmit = run(async event => {
+  event.preventDefault();
+  const input = $('transcription-limit');
+  const button = $('save-transcription-limit');
+  if (!input.reportValidity() || button.disabled) return;
+  button.disabled = true;
+  const minutes = input.valueAsNumber;
+  try {
+    const saved = await call('transcriptionLimit', {minutes});
+    if (input.valueAsNumber === minutes) input.value = saved;
+    notify(saved ? `Transcription limit saved · ${saved} min` : 'Transcription length is unlimited');
+  } finally {
+    button.disabled = false;
+  }
+});
 $('batch-size').onchange = () => { if (jobState) renderBatch(jobState.batch); };
 $('batch-pause').onclick = run(async () => renderBatch(await call('batch', {pause: true})));
 $('play').onclick = run(toggle);

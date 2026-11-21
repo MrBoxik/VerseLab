@@ -478,6 +478,7 @@ public partial class MainWindow : Window
                     break;
                 case "failed":
                 case "cancelled":
+                case "skipped":
                     wanted = null;
                     Activity.Text = job.String("phase", "Preparation stopped");
                     break;

@@ -25,7 +25,7 @@ MODELS = {
     "large-v3": {"file": "ggml-large-v3.bin", "bytes": 3095033483, "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"},
 }
 DEFAULTS = {"model": FIXED_MODEL, "mode": "on_demand", "threads": 4, "language": "auto",
-            "automatic": True, "prefetch": True, "lookahead": 2}
+            "automatic": True, "prefetch": True, "lookahead": 2, "maxTrackMinutes": 20}
 
 
 def validate_settings(values, previous=None):
@@ -41,6 +41,8 @@ def validate_settings(values, previous=None):
         raise ValueError("Prepare between 1 and 5 upcoming songs.")
     if any(type(result[k]) is not bool for k in ("automatic", "prefetch")):
         raise ValueError("Automatic and prefetch settings must be true or false.")
+    if type(result["maxTrackMinutes"]) is not int or not 0 <= result["maxTrackMinutes"] <= 1440:
+        raise ValueError("Maximum track length must be a whole number of minutes from 0 to 1440.")
     return result
 
 
@@ -104,6 +106,11 @@ def decoder_lines(payload):
 
 class Cancelled(Exception):
     pass
+
+
+class TrackTooLong(Exception):
+    def __init__(self, minutes):
+        super().__init__(f"Track exceeds the {minutes}-minute transcription limit.")
 
 
 class Engine:
@@ -247,20 +254,25 @@ class Engine:
 
     def run(self, path, settings, cancel, phase):
         started = time.monotonic()
-        phase("Loading Large-v3")
-        load_seconds = self.ready(settings, cancel)
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise ValueError("ffmpeg is required to decode audio for local transcription.")
         wav = self.base / "data" / "asr-cache" / ("audio-" + uuid.uuid4().hex + ".wav")
         try:
             phase("Decoding audio")
-            subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+            limit = settings["maxTrackMinutes"] * 60
+            # Read just past the cutoff when metadata is missing or inaccurate.
+            bound = ["-t", str(limit + 1)] if limit else []
+            subprocess.run([ffmpeg, "-v", "error", "-i", str(path), *bound, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
                            check=True, capture_output=True, timeout=90, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             with wave.open(str(wav), "rb") as decoded:
                 duration = decoded.getnframes() / decoded.getframerate()
             if duration <= 0:
                 raise ValueError("The recording has no decodable audio.")
+            if limit and duration > limit:
+                raise TrackTooLong(settings["maxTrackMinutes"])
+            phase("Loading Large-v3")
+            load_seconds = self.ready(settings, cancel)
             infer_start = time.monotonic()
             with self.lock:
                 if cancel.is_set() or self.proc is None:
@@ -297,8 +309,10 @@ class Preparation:
         self.folder = base / "data" / "asr-cache"
         self.folder.mkdir(exist_ok=True)
         self.settings_file = base / "data" / "transcription-settings.json"
-        self.settings = dict(DEFAULTS) if defaults_only else validate_settings(
-            json.loads(self.settings_file.read_text()) if self.settings_file.exists() else {})
+        stored = json.loads(self.settings_file.read_text(encoding="utf-8")) if self.settings_file.exists() else {}
+        if defaults_only:
+            stored = {"maxTrackMinutes": stored.get("maxTrackMinutes", DEFAULTS["maxTrackMinutes"])}
+        self.settings = validate_settings(stored)
         self.engine = Engine(base)
         self.condition = threading.Condition(threading.RLock())
         self.jobs, self.pending = {}, []
@@ -435,7 +449,7 @@ class Preparation:
                 self.engine.requirements()
             self.batch_pending = deque(dict.fromkeys(track_ids))
             self.batch = {"status": "running", "total": len(self.batch_pending),
-                          "prepared": 0, "skipped": 0, "failed": 0, "current": None}
+                          "prepared": 0, "skipped": 0, "skippedLong": 0, "failed": 0, "current": None}
             if minutes:
                 self.batch["endsAt"] = time.time() + minutes * 60
                 self.batch_timer = threading.Timer(minutes * 60, self._stop_timed_batch, [self.batch])
@@ -598,7 +612,8 @@ class Preparation:
                 if revision != self.prefetch_revision or self.closed:
                     return
                 job = self.prepare(track_id, "prefetch")
-                if job["status"] != "complete":
+                if job["status"] != "complete" and job["reason"] == "prefetch":
+                    self.jobs[job["key"]]["prefetchRevision"] = revision
                     self.prefetch_remaining -= 1
         except (ValueError, OSError, KeyError):
             return
@@ -688,6 +703,11 @@ class Preparation:
                     job["phase"] = "Checking saved audio timing"
                     result = self._reuse_draft(path, settings, references, metadata, cancel)
                 if result is None and not cancel.is_set():
+                    with self.condition:
+                        limit = self.settings["maxTrackMinutes"]
+                    if limit and float(metadata.get("duration") or 0) > limit * 60:
+                        raise TrackTooLong(limit)
+                    settings["maxTrackMinutes"] = limit
                     result = self.engine.run(path, settings, cancel, lambda phase: job.update(phase=phase))
                     job["phase"] = "Matching lyrics to the audio"
                     fit = self._match(result["lines"], references, {**metadata, "duration": result["duration"]}, cancel)
@@ -714,12 +734,17 @@ class Preparation:
                            underMinute=result["seconds"] <= 60, fasterThanSong=bool(duration and result["seconds"] < duration))
             except Cancelled:
                 job.update(status="cancelled", phase="Cancelled")
+            except TrackTooLong as exc:
+                job.update(status="skipped", phase=str(exc))
             except Exception as exc:
                 job.update(status="cancelled" if cancel.is_set() else "failed", phase="Cancelled" if cancel.is_set() else str(exc), seconds=round(time.time() - job["startedAt"], 2))
                 self.engine.stop()
             finally:
                 with self.condition:
                     self.current = None
+                    if (job["status"] == "skipped" and job["reason"] == "prefetch"
+                            and job.get("prefetchRevision") == self.prefetch_revision):
+                        self.prefetch_remaining += 1
                     if is_batch:
                         self.batch["current"] = None
                         if job["status"] == "complete":
@@ -732,6 +757,10 @@ class Preparation:
                             else:
                                 counter = "skipped" if result["kind"] in {"saved", "online"} else "prepared"
                             self.batch[counter] += 1
+                        elif job["status"] == "skipped":
+                            self.batch["skipped"] += 1
+                            self.batch["skippedLong"] += 1
+                            self.batch["consecutiveFailures"] = 0
                         elif job["status"] == "failed":
                             self.batch["failed"] += 1
                             self.batch["lastError"] = job["phase"]

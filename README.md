@@ -12,6 +12,8 @@ Verse Lab is a Windows lyrics player and optional companion to [Taskbar Media Pr
 
 Verse Lab prefers embedded lyrics. Online matches must show the same duration to the second and differ by at most 50 milliseconds. If no strict match exists, Verse Lab can prepare a draft from a local audio file. Timed preparation can process a folder in the tray and embed results in supported audio tags. Formats without a writable lyrics tag use a companion LRC file.
 
+In **Library preparation**, set **Maximum transcription length** to skip local transcription for longer tracks, including audiobooks. The default is 20 minutes. Use 0 for no limit. The setting applies as tracks are picked up for transcription, and embedded or matching online lyrics remain available.
+
 Open **Taskbar setup** in Verse Lab and follow [the local setup instructions](setup/taskbar/SETUP.md). [Taskbar Media Presence](https://github.com/MrBoxik/Taskbar-Media-Presence) runs in Windhawk. With both apps running, enable **Show lyrics** on the widget. **Automatically fit lyrics** sizes the strip from the longest line and the available taskbar space.
 
 The app sends the song title and artist to LRCLIB when looking up lyrics. Local transcription runs on your PC.

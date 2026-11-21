@@ -4,8 +4,9 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from unittest.mock import patch
-from transcription import DEFAULTS, Cancelled, Preparation, decoder_lines, recording_key, legacy_anchor_key, validate_settings
+from transcription import DEFAULTS, Cancelled, Engine, Preparation, TrackTooLong, decoder_lines, recording_key, legacy_anchor_key, validate_settings
 
 
 def wait_until(predicate, timeout=5):
@@ -62,6 +63,60 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(self.manager.status()['batch']['skipped'],1)
         self.assertEqual(self.manager.status()['batch']['prepared'],1)
         self.assertEqual(self.fake.started,['a','a','b','b'])
+
+    def test_length_limit_skips_long_tracks_and_continues_batch(self):
+        original_metadata = self.manager.get_metadata
+        self.manager.get_metadata = lambda key: {
+            **original_metadata(key), "duration": 9 * 3600 if key != "c" else 120,
+        }
+        self.manager.configure({"maxTrackMinutes": 2})
+        manual = self.manager.prepare("a", "manual", force=True)
+        wait_until(lambda: self.manager.jobs[manual["key"]]["status"] == "skipped")
+        self.fake.release.set()
+        self.manager.start_batch(["a", "b", "c"])
+        wait_until(lambda: self.manager.status()["batch"]["status"] == "complete")
+        batch = self.manager.status()["batch"]
+        self.assertEqual((batch["prepared"], batch["skippedLong"], batch["failed"]), (1, 2, 0))
+        self.assertEqual(self.fake.started, ["c"])
+
+    def test_over_limit_prefetch_leaves_capacity_for_next_track(self):
+        original_metadata = self.manager.get_metadata
+        self.manager.get_metadata = lambda key: {
+            **original_metadata(key), "duration": 540 * 60 if key == "a" else 120,
+        }
+        self.manager.embed_audio = True
+        self.manager.configure({"maxTrackMinutes": 5, "lookahead": 1})
+        self.fake.release.set()
+        with patch("transcription.save_audio_lyrics", return_value={"embeddedDigest": "saved"}):
+            self.manager.prefetch(["a", "b", "c"])
+            wait_until(lambda: any(job["trackId"] == "b" and job["status"] == "complete"
+                                   for job in self.manager.status()["jobs"]))
+        self.assertEqual(self.fake.started, ["b"])
+
+    def test_desktop_reloads_length_limit_and_keeps_its_engine_defaults(self):
+        self.manager.configure({"maxTrackMinutes": 45, "threads": 8})
+        restored = Preparation(self.base, self.manager.get_path, self.manager.get_metadata,
+                               self.manager.find_online, self.manager.get_saved, defaults_only=True)
+        try:
+            self.assertEqual(restored.settings["maxTrackMinutes"], 45)
+            self.assertEqual(restored.settings["threads"], DEFAULTS["threads"])
+        finally:
+            restored.close()
+            restored.thread.join(timeout=2)
+
+    def test_unknown_duration_is_checked_before_the_model_loads(self):
+        def decode(command, **kwargs):
+            self.assertEqual(command[command.index("-t") + 1], "61")
+            with wave.open(command[-1], "wb") as audio:
+                audio.setparams((1, 2, 1, 61, "NONE", "not compressed"))
+                audio.writeframes(bytes(122))
+        engine = Engine(self.base)
+        with patch("transcription.shutil.which", return_value="ffmpeg"), \
+                patch("transcription.subprocess.run", side_effect=decode), \
+                patch.object(engine, "ready") as ready:
+            with self.assertRaises(TrackTooLong):
+                engine.run(self.paths["a"], {**DEFAULTS, "maxTrackMinutes": 1}, threading.Event(), lambda _: None)
+            ready.assert_not_called()
 
     def test_current_track_preempts_prefetch_then_runs_before_remaining_queue(self):
         self.manager.prepare('a','prefetch');wait_until(lambda:self.fake.started==['a'])

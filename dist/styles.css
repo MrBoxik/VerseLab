@@ -54,6 +54,8 @@
 .external-track span { font-size: 11px; color: #c1b0ce; }
 .external-track .text-button { justify-self: start; }
 .batch-option { display: block; margin-top: 12px; font-size: 12px; color: #c9bad4; }
+.transcription-limit-input { margin-top: 7px; font-size: 12px; color: #c9bad4; }
+.transcription-limit-input input { width: 5em; padding: 8px; color: inherit; background: #211c2b; border: 1px solid var(--line); border-radius: 6px; }
 .close-setting { display: flex; align-items: center; gap: 9px; margin: 14px 0; color: #d7c6e4; font-size: 13px; }
 .close-setting input { accent-color: #c4a1ff; }
 .taskbar-section { padding-top: 0; margin-bottom: 20px; }

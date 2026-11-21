@@ -231,6 +231,7 @@ public partial class PlayerWindow : Window
             case "result":
             case "cancel":
             case "status":
+            case "transcriptionLimit":
             case "batch":
             case "search":
                 return await bridge.Send(request);

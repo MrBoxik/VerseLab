@@ -207,10 +207,10 @@ internal sealed class TaskbarLyricsWorker
                 if (result.ValueKind == JsonValueKind.Object)
                     SetLyrics(result);
             }
-            else if (phase is "failed" or "cancelled")
+            else if (phase is "failed" or "cancelled" or "skipped")
             {
                 jobKey = null;
-                status = "Lyrics unavailable";
+                status = phase == "skipped" ? job.GetProperty("phase").GetString() ?? "Transcription skipped" : "Lyrics unavailable";
             }
             break;
         }
