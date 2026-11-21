@@ -20,7 +20,8 @@ def checksum(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=[FIXED_MODEL, "all"], default=FIXED_MODEL)
-    parser.parse_args()
+    parser.add_argument("--download-only", action="store_true")
+    args = parser.parse_args()
     spec = MODELS[FIXED_MODEL]
     target = BASE / "models" / spec["file"]
     target.parent.mkdir(exist_ok=True)
@@ -32,6 +33,9 @@ def main():
             partial.unlink(missing_ok=True)
             raise ValueError("Large-v3 checksum mismatch")
         partial.replace(target)
+    if args.download_only:
+        print("Whisper Large-v3 model is ready.", flush=True)
+        return
     env = {**os.environ, "DOTNET_CLI_HOME": str(BASE / "runtime" / "dotnet-home"),
            "NUGET_PACKAGES": str(BASE / "runtime" / "nuget"), "DOTNET_CLI_TELEMETRY_OPTOUT": "1"}
     project = BASE / "experiments" / "large-model" / "LargeModelBenchmark.csproj"

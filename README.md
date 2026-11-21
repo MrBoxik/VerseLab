@@ -4,10 +4,9 @@ Verse Lab is a Windows lyrics player and optional companion to [Taskbar Media Pr
 
 ## Install
 
-1. Download and extract `VerseLab-win-x64.zip` from [Releases](https://github.com/MrBoxik/VerseLab/releases).
-2. Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0), [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), Python 3.11 or newer, and FFmpeg on your Windows PATH.
-3. In the extracted folder, run `python -m pip install -r requirements.txt`, then open **Verse Lab.exe**. Select your music folder in the player.
-4. For offline lyric generation, install the .NET 10 SDK and run `python setup_transcription.py` from the same folder. It downloads and checks the roughly 3.1 GB Whisper Large-v3 model and builds the Vulkan worker.
+1. Download and run [VerseLab-Setup-win-x64.exe](https://github.com/MrBoxik/VerseLab/releases/latest/download/VerseLab-Setup-win-x64.exe) on Windows 11 x64. Setup uses your Windows account and downloads the audio tools over the internet.
+2. Select **Offline transcription model** in Setup if you want Verse Lab to generate missing lyrics. This adds a roughly 3.1 GB download and uses a Vulkan-capable GPU. You can run Setup again to add it later.
+3. Open **Verse Lab** from Start and select your music folder. The desktop view uses the Windows WebView2 runtime.
 
 ## Lyrics and the taskbar
 
@@ -19,9 +18,17 @@ The app sends the song title and artist to LRCLIB when looking up lyrics. Local 
 
 ## Build
 
+Install the .NET 10 SDK, Python 3.11 or newer, and FFmpeg. For a development checkout, install the Python dependencies with `python -m pip install -r requirements.txt`. Run `python setup_transcription.py` for the model and development worker.
+
 ```powershell
 dotnet publish desktop/VerseLab.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o desktop/release
 Copy-Item -LiteralPath 'desktop/release/Verse Lab.exe' -Destination 'Verse Lab.exe'
 python -m unittest discover -s tests
 node --test tests/lyrics.test.mjs
 ```
+
+To build the Windows installer, download the [NSIS compiler](https://sourceforge.net/projects/nsis/files/NSIS%203/3.11/) and run `setup/build-installer.ps1 -NsisCompiler path/to/makensis.exe`. The build writes the executable to `runtime/installer-build`.
+
+## License and support
+
+Verse Lab is available under the [MIT license](LICENSE). See the [third-party notices](THIRD_PARTY.md) for bundled and downloaded components. [Support MrBoxik on Buy Me a Coffee](https://buymeacoffee.com/mrboxik).

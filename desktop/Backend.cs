@@ -26,6 +26,9 @@ internal sealed class Backend : IAsyncDisposable
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+        string ffmpeg = Path.Combine(root, "runtime", "ffmpeg");
+        if (File.Exists(Path.Combine(ffmpeg, "ffmpeg.exe")))
+            info.Environment["PATH"] = ffmpeg + Path.PathSeparator + info.Environment["PATH"];
         info.ArgumentList.Add(Path.Combine(root, "desktop_bridge.py"));
         process = Process.Start(info) ?? throw new InvalidOperationException("Could not open the local lyrics engine.");
         process.ErrorDataReceived += (_, e) =>

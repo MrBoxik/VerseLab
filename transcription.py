@@ -148,12 +148,18 @@ class Engine:
                     "pid": self.proc.pid if loaded else None}
 
     def requirements(self):
-        binary = self.base / "runtime" / "lyrics-gpu" / "LargeModelBenchmark.dll"
+        folder = self.base / "runtime" / "lyrics-gpu"
+        bundled = folder / "LargeModelBenchmark.exe"
+        binary = folder / "LargeModelBenchmark.dll"
         model = self.base / "models" / MODELS[FIXED_MODEL]["file"]
+        if not model.is_file():
+            raise ValueError("Run Verse Lab Setup and select the offline transcription model.")
+        if bundled.is_file():
+            return [str(bundled)], model
         dotnet = shutil.which("dotnet")
-        if not dotnet or not binary.is_file() or not model.is_file():
-            raise ValueError("Large-v3 runtime or model missing. Run setup_transcription.py.")
-        return dotnet, binary, model
+        if not dotnet or not binary.is_file():
+            raise ValueError("The local transcription worker is missing. Run Verse Lab Setup or setup_transcription.py.")
+        return [dotnet, str(binary)], model
 
     @staticmethod
     def _receive(messages, cancel, timeout):
@@ -199,7 +205,7 @@ class Engine:
             if self.proc and self.proc.poll() is None and self.signature == signature and not self.warming:
                 return 0
             self.stop()
-            dotnet, binary, model = self.requirements()
+            command, model = self.requirements()
         slot = self._reserve_worker(cancel)
         with self.lock:
             self.worker_slot = slot
@@ -209,7 +215,7 @@ class Engine:
                 self.log = (self.base / "data" / "transcription-worker.log").open("w", encoding="utf-8")
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
                 started = time.monotonic()
-                self.proc = subprocess.Popen([dotnet, str(binary), "--worker", str(model)], cwd=self.base,
+                self.proc = subprocess.Popen([*command, "--worker", str(model)], cwd=self.base,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8", creationflags=flags)
             except BaseException:
                 self.stop()
